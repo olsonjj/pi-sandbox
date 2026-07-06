@@ -11,9 +11,12 @@ set -euo pipefail
 #   pi-sandbox --network                # allow outbound network (needed for API)
 #   pi-sandbox --mount ~/.pi/agent      # mount additional path
 #   pi-sandbox --image my-image         # use custom Docker image
+#   pi-sandbox --rebuild                # force rebuild of Docker image
+#   pi-sandbox --version                # show version information
 #   cat file.txt | pi-sandbox -p "summarize"
 #
 # First run builds a Docker image (one-time). Subsequent runs are instant.
+# Use --rebuild to force a fresh build (e.g. to pick up new pi versions).
 
 IMAGE_NAME="${PI_SANDBOX_IMAGE:-pi-sandbox}"
 NODE_VERSION="${PI_SANDBOX_NODE:-22}"
@@ -21,12 +24,16 @@ CONTAINER_WORKDIR="/workspace"
 SANDBOX_HOME="/tmp/pi-sandbox-home"
 
 # ── Parse wrapper-specific flags ──────────────────────────────────────────
+# Flags consumed by this wrapper (--network, --mount, etc.) are handled here.
+# Everything else is collected in PASSTHROUGH_ARGS and forwarded to pi.
 NETWORK="none"
 EXTRA_MOUNTS=()
 PASSTHROUGH_ARGS=()
 COMMAND="pi"
+REBUILD="false"
 
 # ── Guards ─────────────────────────────────────────────────────────────────
+# These are required for mount paths. Fail early with a clear message.
 if [[ -z "${PWD:-}" ]]; then
   echo "❌ PWD is not set" >&2
   exit 1
@@ -70,6 +77,30 @@ while [[ $# -gt 0 ]]; do
       COMMAND="${1#*=}"
       shift
       ;;
+    --rebuild)
+      REBUILD="true"
+      shift
+      ;;
+    --version)
+      # Resolve symlinks to find the real script location
+      SCRIPT_PATH="$0"
+      while [[ -L "$SCRIPT_PATH" ]]; do
+        SCRIPT_DIR_TMP="$(dirname "$SCRIPT_PATH")"
+        SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+        [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR_TMP/$SCRIPT_PATH"
+      done
+      SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+      WRAPPER_VERSION="unknown"
+      if [[ -f "$SCRIPT_DIR/package.json" ]]; then
+        WRAPPER_VERSION=$(node -e "console.log(require('$SCRIPT_DIR/package.json').version)" 2>/dev/null || echo "unknown")
+      fi
+      echo "pi-sandbox $WRAPPER_VERSION"
+      if command -v docker &>/dev/null && docker image inspect "$IMAGE_NAME" &>/dev/null 2>&1; then
+        IMAGE_PI_VERSION=$(docker run --rm --entrypoint pi "$IMAGE_NAME" --version 2>/dev/null || echo "unknown")
+        echo "image pi: $IMAGE_PI_VERSION"
+      fi
+      exit 0
+      ;;
     --help)
       echo "pi-sandbox — run Pi in an isolated Docker container"
       echo ""
@@ -81,6 +112,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --mount <path>   Mount additional host path into container"
       echo "  --image <name>   Use custom Docker image (default: pi-sandbox)"
       echo "  --cmd <command>  Command to run inside container (default: pi)"
+      echo "  --rebuild        Force rebuild of the Docker image"
+      echo "  --version        Show version information"
       echo "  --help           Show this help"
       echo ""
       echo "All other arguments are passed through to pi."
@@ -101,6 +134,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Check prerequisites ───────────────────────────────────────────────────
+# Docker must be installed and the daemon running. Podman is not supported.
 if ! command -v docker &>/dev/null; then
   echo "❌ Docker is not installed. Install it first: https://docs.docker.com/get-docker/" >&2
   exit 1
@@ -112,6 +146,16 @@ if ! docker info &>/dev/null; then
 fi
 
 # ── Build image if needed ─────────────────────────────────────────────────
+# The image is built once and reused. It includes:
+#   - node (specified by NODE_VERSION) as the base
+#   - pi installed globally (--ignore-scripts for safety)
+#   - git, ripgrep, fd-find for agent use
+#   - A clean HOME at /tmp/pi-sandbox-home (tmpfs at runtime)
+if [[ "$REBUILD" == "true" ]]; then
+  echo "🔨 Rebuilding sandbox image '$IMAGE_NAME'..." >&2
+  docker rmi "$IMAGE_NAME" 2>/dev/null || true
+fi
+
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
   echo "🔨 Building sandbox image '$IMAGE_NAME' (one-time setup)..." >&2
   TMPDIR=$(mktemp -d)
@@ -143,7 +187,26 @@ DOCKERFILE
   echo "✅ Image built successfully." >&2
 fi
 
+# ── Warn if image is stale ────────────────────────────────────────────────
+# Images older than 30 days may have outdated pi or unpatched CVEs.
+# This is a non-blocking warning; use --rebuild to force a refresh.
+if [[ "$REBUILD" != "true" ]]; then
+  CREATED=$(docker image inspect --format '{{.Created}}' "$IMAGE_NAME" 2>/dev/null)
+  if [[ -n "$CREATED" ]]; then
+    # Parse the Docker timestamp (format: 2024-01-15T10:30:00.123456789Z)
+    CREATED_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${CREATED%%.*}" +%s 2>/dev/null || date -d "$CREATED" +%s 2>/dev/null || echo "0")
+    NOW_EPOCH=$(date +%s)
+    AGE_DAYS=$(( (NOW_EPOCH - CREATED_EPOCH) / 86400 ))
+    if (( AGE_DAYS > 30 )); then
+      echo "⚠️  Sandbox image is $AGE_DAYS days old. Consider: pi-sandbox --rebuild" >&2
+    fi
+  fi
+fi
+
 # ── Collect API key environment variables ─────────────────────────────────
+# Forward known provider API keys from the host into the container.
+# Only keys that are actually set are passed through (no empty vars).
+# Also forward any PI_* vars for pi-specific configuration.
 ENV_ARGS=()
 for VAR in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GROQ_API_KEY \
            DEEPSEEK_API_KEY MISTRAL_API_KEY XAI_API_KEY CEREBRAS_API_KEY \
@@ -162,6 +225,12 @@ for VAR in $(env | grep '^PI_' | cut -d= -f1); do
 done
 
 # ── Build mount arguments ─────────────────────────────────────────────────
+# Security design:
+#   - $PWD mounted read-write (the project you're working on)
+#   - node_modules is an anonymous volume (isolates from host)
+#   - /tmp and $SANDBOX_HOME are tmpfs (ephemeral, in-memory)
+#   - ~/.pi/agent mounted read-write (pi needs lock files + sessions)
+#   - Extra mounts (--mount flag) default to read-only
 MOUNT_ARGS=(
   -v "$PWD:$CONTAINER_WORKDIR:rw"
   # Anonymous volume for node_modules (don't leak host node_modules)
@@ -186,7 +255,16 @@ if [[ ${#EXTRA_MOUNTS[@]} -gt 0 ]]; then
 fi
 
 # ── Run container ─────────────────────────────────────────────────────────
-# If stdout is a terminal, allocate a TTY for interactive mode
+# Security hardening:
+#   --rm              Remove container on exit (no leftover state)
+#   --cap-drop=ALL    Drop all Linux capabilities
+#   --no-new-privileges  Prevent privilege escalation via setuid
+#   --user            Run as the host user (not root)
+#   --network none    No outbound network by default
+#
+# TTY handling:
+#   -it   Interactive terminal (stdin + stdout are TTYs)
+#   -i    Piped input (stdin is not a TTY, e.g. cat file | pi-sandbox)
 TTY_ARGS=()
 if [[ -t 0 && -t 1 ]]; then
   TTY_ARGS=(-it)
