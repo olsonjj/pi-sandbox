@@ -24,7 +24,17 @@ SANDBOX_HOME="/tmp/pi-sandbox-home"
 NETWORK="none"
 EXTRA_MOUNTS=()
 PASSTHROUGH_ARGS=()
-COMMAND="pi"  # default command to run inside container
+COMMAND="pi"
+
+# ── Guards ─────────────────────────────────────────────────────────────────
+if [[ -z "${PWD:-}" ]]; then
+  echo "❌ PWD is not set" >&2
+  exit 1
+fi
+if [[ -z "${HOME:-}" ]]; then
+  echo "❌ HOME is not set" >&2
+  exit 1
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -106,13 +116,14 @@ if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
   echo "🔨 Building sandbox image '$IMAGE_NAME' (one-time setup)..." >&2
   TMPDIR=$(mktemp -d)
   cat > "$TMPDIR/Dockerfile" <<'DOCKERFILE'
-FROM node:__NODE_VERSION__-slim
+ARG NODE_VERSION=22
+FROM node:${NODE_VERSION}-slim
 
 # Install pi globally (--ignore-scripts for safety)
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # Create a clean home for the container user
-RUN mkdir -p /tmp/pi-sandbox-home && chmod 777 /tmp/pi-sandbox-home
+RUN mkdir -p /tmp/pi-sandbox-home && chmod 755 /tmp/pi-sandbox-home
 
 # Install basic tools the agent might need
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -125,11 +136,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV HOME=/tmp/pi-sandbox-home
 ENV PI_CODING_AGENT_DIR=/tmp/pi-sandbox-home/.pi/agent
 WORKDIR /workspace
-ENTRYPOINT ["pi"]
+CMD ["pi"]
 DOCKERFILE
-  sed -i '' "s/__NODE_VERSION__/$NODE_VERSION/" "$TMPDIR/Dockerfile" 2>/dev/null || \
-    sed -i "s/__NODE_VERSION__/$NODE_VERSION/" "$TMPDIR/Dockerfile"
-  docker build -t "$IMAGE_NAME" "$TMPDIR" >&2
+  docker build --build-arg NODE_VERSION="$NODE_VERSION" -t "$IMAGE_NAME" "$TMPDIR" >&2
   rm -rf "$TMPDIR"
   echo "✅ Image built successfully." >&2
 fi
@@ -159,9 +168,9 @@ MOUNT_ARGS=(
   -v "$CONTAINER_WORKDIR/node_modules"
   # tmpfs for writable temp areas (must come BEFORE bind mounts)
   --tmpfs /tmp:exec,uid=1000,gid=1000
-  --tmpfs /tmp/pi-sandbox-home:exec,uid=1000,gid=1000
+  --tmpfs "$SANDBOX_HOME:exec,uid=1000,gid=1000"
   # Mount Pi config read-write (pi needs to write lock files + sessions)
-  -v "$HOME/.pi/agent:/tmp/pi-sandbox-home/.pi/agent:rw"
+  -v "$HOME/.pi/agent:$SANDBOX_HOME/.pi/agent:rw"
 )
 
 if [[ ${#EXTRA_MOUNTS[@]} -gt 0 ]]; then
@@ -174,12 +183,6 @@ if [[ ${#EXTRA_MOUNTS[@]} -gt 0 ]]; then
       echo "⚠️  Mount path does not exist, skipping: $expanded" >&2
     fi
   done
-fi
-
-# ── Check if stdin is piped ───────────────────────────────────────────────
-STDIN_ARGS=()
-if [[ ! -t 0 ]]; then
-  STDIN_ARGS=(-i)  # keep stdin open, but not a TTY
 fi
 
 # ── Run container ─────────────────────────────────────────────────────────
@@ -197,6 +200,7 @@ exec docker run \
   --network "$NETWORK" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
+  --user "$(id -u):$(id -g)" \
   --hostname pi-sandbox \
   "${MOUNT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \

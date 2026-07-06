@@ -1,13 +1,17 @@
 # pi-sandbox
 
+> ⚠️ **Testing only** — not yet published to npm. For development and local use.
+
 Run [Pi](https://github.com/earendil-works/pi-coding-agent) (or any coding agent) in an isolated throwaway Docker container.
 
 Only the current project directory is mounted. No home directory, no `~/.ssh`, no secrets.
 
-## Install
+## Install (local only)
 
 ```bash
-npm install -g pi-sandbox
+git clone https://github.com/olsonjj/pi-sandbox.git
+cd pi-sandbox
+npm install -g .
 ```
 
 ## Usage
@@ -34,5 +38,5 @@ First run builds a Docker image (one-time). Subsequent runs are instant.
 
 ## Requirements
 
-- [Docker](https://docs.docker.com/get-docker/)
+- [Docker](https://docs.docker.com/get-docker/) (Podman is not currently supported)
 - [Pi](https://github.com/earendil-works/pi-coding-agent) (installed in the container image automatically)
