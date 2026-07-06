@@ -56,6 +56,22 @@ Together, Fireworks, HuggingFace, Ollama
 - Container is removed on exit (`--rm`)
 - Extra mounts default to read-only
 
+## Limitations
+
+- **Extensions with native dependencies** — the container runs Linux. Extensions
+  with binaries compiled for macOS (via `node-gyp`, etc.) will fail.
+  Pure JS/TS extensions and pi packages work fine.
+- **macOS UID mismatch** — the container runs as your host UID via `--user`,
+  but that UID doesn't exist in the container's `/etc/passwd`. Most tools
+  handle this gracefully, but some may warn or fail.
+- **Windows** — not supported natively. Works under WSL.
+- **No image auto-update** — the Docker image is built once. To pick up new
+  pi versions or security patches, run `docker rmi pi-sandbox` and re-run.
+- **No `--env` flag** — only known API keys and `PI_*` vars are forwarded.
+  Arbitrary environment variables cannot be passed through.
+- **Host `.pi/agent` mounted read-write** — the container can modify your
+  pi config, sessions, and lock files.
+
 ## Requirements
 
 - [Docker](https://docs.docker.com/get-docker/) (Podman is not currently supported)
