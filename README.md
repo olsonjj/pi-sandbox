@@ -28,6 +28,26 @@ cat file.txt | pi-sandbox -p "summarize"
 
 First run builds a Docker image (one-time). Subsequent runs are instant.
 
+## Providers
+
+API keys are forwarded from your host environment. Set them before running:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+# ... then run with --network
+pi-sandbox --network -p "hello"
+```
+
+Supported provider keys forwarded automatically:
+
+Anthropic, OpenAI, Google, Groq, DeepSeek, Mistral, xAI, Cerebras,
+Gemini, Vertex AI, Azure OpenAI, AWS Bedrock, OpenRouter, Cloudflare,
+Together, Fireworks, HuggingFace, Ollama
+
+> **Note:** `--network` is required for API access. Without it, the container
+> has no outbound network and cannot reach any provider.
+
 ## Security
 
 - `--cap-drop=ALL` — drops all Linux capabilities
