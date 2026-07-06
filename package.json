@@ -1,0 +1,25 @@
+{
+  "name": "pi-sandbox",
+  "version": "1.0.0",
+  "description": "Run Pi coding agent in an isolated throwaway Docker container",
+  "bin": {
+    "pi-sandbox": "./pi-sandbox"
+  },
+  "files": [
+    "pi-sandbox"
+  ],
+  "keywords": [
+    "pi",
+    "coding-agent",
+    "docker",
+    "sandbox",
+    "security",
+    "isolation"
+  ],
+  "author": "John Olson <olsonjj@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/olsonjj/pi-sandbox.git"
+  }
+}
