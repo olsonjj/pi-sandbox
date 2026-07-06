@@ -43,6 +43,10 @@ if [[ -z "${HOME:-}" ]]; then
   exit 1
 fi
 
+# Capture host user/group for tmpfs ownership and --user flag
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --network)
@@ -151,14 +155,18 @@ fi
 #   - pi installed globally (--ignore-scripts for safety)
 #   - git, ripgrep, fd-find for agent use
 #   - A clean HOME at /tmp/pi-sandbox-home (tmpfs at runtime)
+#
+# --rebuild uses --no-cache for a fresh build. The old image is kept until
+# the new build succeeds, so a failed rebuild doesn't leave you stranded.
 if [[ "$REBUILD" == "true" ]]; then
-  echo "🔨 Rebuilding sandbox image '$IMAGE_NAME'..." >&2
-  docker rmi "$IMAGE_NAME" 2>/dev/null || true
+  echo "🔨 Rebuilding sandbox image '$IMAGE_NAME' (--no-cache)..." >&2
 fi
 
-if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-  echo "🔨 Building sandbox image '$IMAGE_NAME' (one-time setup)..." >&2
+if ! docker image inspect "$IMAGE_NAME" &>/dev/null || [[ "$REBUILD" == "true" ]]; then
+  echo "🔨 Building sandbox image '$IMAGE_NAME'..." >&2
   TMPDIR=$(mktemp -d)
+  # Clean up temp directory on exit (build failure, interrupt, etc.)
+  trap "rm -rf '$TMPDIR'" EXIT
   cat > "$TMPDIR/Dockerfile" <<'DOCKERFILE'
 ARG NODE_VERSION=22
 FROM node:${NODE_VERSION}-slim
@@ -182,8 +190,11 @@ ENV PI_CODING_AGENT_DIR=/tmp/pi-sandbox-home/.pi/agent
 WORKDIR /workspace
 CMD ["pi"]
 DOCKERFILE
-  docker build --build-arg NODE_VERSION="$NODE_VERSION" -t "$IMAGE_NAME" "$TMPDIR" >&2
+  BUILD_ARGS=(--build-arg NODE_VERSION="$NODE_VERSION")
+  [[ "$REBUILD" == "true" ]] && BUILD_ARGS+=(--no-cache)
+  docker build "${BUILD_ARGS[@]}" -t "$IMAGE_NAME" "$TMPDIR" >&2
   rm -rf "$TMPDIR"
+  trap - EXIT
   echo "✅ Image built successfully." >&2
 fi
 
@@ -236,8 +247,8 @@ MOUNT_ARGS=(
   # Anonymous volume for node_modules (don't leak host node_modules)
   -v "$CONTAINER_WORKDIR/node_modules"
   # tmpfs for writable temp areas (must come BEFORE bind mounts)
-  --tmpfs /tmp:exec,uid=1000,gid=1000
-  --tmpfs "$SANDBOX_HOME:exec,uid=1000,gid=1000"
+  --tmpfs /tmp:exec,uid=$HOST_UID,gid=$HOST_GID
+  --tmpfs "$SANDBOX_HOME:exec,uid=$HOST_UID,gid=$HOST_GID"
   # Mount Pi config read-write (pi needs to write lock files + sessions)
   -v "$HOME/.pi/agent:$SANDBOX_HOME/.pi/agent:rw"
 )
@@ -246,6 +257,11 @@ if [[ ${#EXTRA_MOUNTS[@]} -gt 0 ]]; then
   for mount_path in "${EXTRA_MOUNTS[@]}"; do
     # Expand ~ in paths
     expanded="${mount_path/#\~/$HOME}"
+    # Skip if this would duplicate the default ~/.pi/agent mount
+    if [[ "$expanded" == "$HOME/.pi/agent" ]]; then
+      echo "⚠️  Skipping --mount ~/.pi/agent (already mounted by default)" >&2
+      continue
+    fi
     if [[ -e "$expanded" ]]; then
       MOUNT_ARGS+=(-v "$expanded:$expanded:ro")
     else
@@ -278,7 +294,7 @@ exec docker run \
   --network "$NETWORK" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
-  --user "$(id -u):$(id -g)" \
+  --user "$HOST_UID:$HOST_GID" \
   --hostname pi-sandbox \
   "${MOUNT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \
